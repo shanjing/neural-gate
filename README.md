@@ -1,6 +1,6 @@
 # neural-gate
 
-neural-gate is a high-performance, Kubernetes-native Inference-as-a-Service gateway. It acts as the central entry point for all agentic applications (like Draft, MarginCall, and sudoroot), providing a unified OpenAI-compatible API across heterogeneous hardware—from Apple Silicon Mac to NVIDIA-powered cloud clusters.
+neural-gate is a high-performance, Kubernetes-native Inference-as-a-Service gateway. It acts as the central entry point for all agentic applications (like Draft, MarginCall, and sudoroot), providing a unified OpenAI-compatible API across heterogeneous hardware—from NVIDIA-powered cloud clusters to Apple Silicon Mac.
 
 ## Key Features
 
