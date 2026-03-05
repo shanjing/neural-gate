@@ -1,8 +1,8 @@
-# Inference Stack Design
+# neural-gate Inference Design
 
 **Scope:** A production-grade inference stack that runs locally on a Mac Mini and deploys to GKE/AWS with minimal changes. This is a **separate project** (`neural-gate` repo) that serves all agentic apps (Draft, MarginCall, etc.) via an OpenAI-compatible API.
 
-The [intelligence layer design](intelligence-layer-design.md) describes how the Draft app consumes the inference endpoint for RAG and Ask.
+For how a consumer app (e.g. Draft) uses the inference endpoint, see that app’s docs (e.g. intelligence layer / RAG design). [Infrastructure_design.md](Infrastructure_design.md) describes the Kubernetes layout, Helm chart, and deployment workflow.
 
 ---
 
@@ -10,7 +10,7 @@ The [intelligence layer design](intelligence-layer-design.md) describes how the 
 
 1. **Simulate a production inference stack** — same control plane (KServe), scheduling (llm-d), and engine patterns used by enterprises on GKE/EKS.
 2. **Provide local LLM to all agentic apps** — one shared service, every app points `LLM_ENDPOINT` at the same K8s Service.
-3. **Minimum changes for cloud deployment** — Kustomize overlays swap the engine image, GPU resource type, and PV backend. App code changes zero lines.
+3. **Minimum changes for cloud deployment** — Helm value overrides (e.g. `values-gke.yaml`) swap the engine image, GPU resource type, and PV backend. App code changes zero lines.
 
 ---
 
@@ -65,23 +65,18 @@ Exposes: /v1/chat/completions           (one env var, same for all apps)
 ```
 neural-gate/
 ├── k8s/
-│   ├── base/                        # Kustomize base (engine-agnostic)
-│   │   ├── namespace.yaml
-│   │   ├── kserve/                  # InferenceService CRDs
-│   │   ├── llm-d/                   # Scheduler config (Envoy + EPP)
-│   │   ├── gateway/                 # Gateway API routes
-│   │   ├── device-plugin/           # generic-device-plugin DaemonSet
-│   │   └── monitoring/              # Prometheus rules, Grafana dashboards
-│   ├── overlays/
-│   │   ├── local-krunkit/           # llama-server + krunkit GPU + GGUF models
-│   │   ├── local-native/            # mlx-lm on host + ExternalName (fallback)
-│   │   └── gke-production/          # vLLM + A100/H100 + real autoscaling
-│   └── models/                      # Model configs (name, quant, PV size)
-├── native/                          # launchd plists, start scripts (macOS)
-├── scripts/                         # Setup, smoke tests, benchmark
-├── docs/                            # This design doc lives here
-└── Makefile                         # make local-up, make gke-deploy, make smoke-test
+│   └── neural-gate/                 # Helm chart (single chart, all envs)
+│       ├── Chart.yaml
+│       ├── values.yaml             # Defaults: local-krunkit (llama-server, squat.ai/dri)
+│       ├── values-gke.yaml          # GKE overrides (vLLM, nvidia.com/gpu, PVC)
+│       └── templates/              # Namespace, device-plugin, InferenceService,
+│                                   # Gateway, HTTPRoute, llm-d, monitoring
+├── scripts/                         # setup.sh (cluster, KServe, Helm deploy), smoke-test, benchmark
+├── docs/                            # This doc, Infrastructure_design.md, mac_runbook.md
+└── requirements.txt                 # Python deps (e.g. huggingface-hub for model download)
 ```
+
+Deployment is driven by `scripts/setup.sh`: option 4 installs the cluster and KServe stack (cert-manager, Gateway API, Envoy Gateway, KServe CRDs and controller, MetalLB); option 5 runs `helm upgrade --install neural-gate` with `--set` for the selected models. See [Infrastructure_design.md](Infrastructure_design.md) for the full Helm chart structure and values.
 
 ---
 
@@ -115,7 +110,7 @@ Apple's Metal framework has no container GPU passthrough. Docker's own vllm-meta
 
 - vLLM-Metal and vLLM-MLX require native macOS — they cannot run inside K8s pods
 - The krunkit virtio-gpu path uses Vulkan, not Metal
-- llama-server (GGUF + Vulkan) is the engine for the in-cluster local overlay
+- llama-server (GGUF + Vulkan) is the engine for the in-cluster local path (Helm default values)
 
 ---
 
@@ -161,14 +156,13 @@ The server must bind to `0.0.0.0`, not `127.0.0.1`. Cluster nodes reach the host
 
 ### Model Selection (krunkit in-cluster path)
 
-Running multiple models inside K8s pods exercises KServe multi-model serving, canary rollouts, and llm-d routing — the patterns that matter in production.
+Running multiple models inside K8s pods exercises KServe multi-model serving, canary rollouts, and llm-d routing — the patterns that matter in production. Current lineup: Qwen3 1.7B and 8B (GGUF), plus Qwen2.5 32B for high-quality or native single-model use.
 
-
-| Model                              | Disk    | Active memory | Role                               |
-| ---------------------------------- | ------- | ------------- | ---------------------------------- |
-| 8B-4bit (e.g. Qwen2.5-8B-Instruct) | ~5 GB   | ~6 GB         | Primary — quality                  |
-| 4B-4bit (e.g. Qwen2.5-4B-Instruct) | ~2.5 GB | ~3 GB         | Secondary — A/B testing, canary    |
-| 0.5B-4bit (e.g. Qwen2.5-0.5B)      | ~0.5 GB | ~1 GB         | Router / prefill worker / fallback |
+| Model                | Disk     | Active memory | Role                              |
+| -------------------- | -------- | ------------- | --------------------------------- |
+| Qwen3-8B (GGUF Q4)   | ~5 GB    | ~6 GB         | Primary — quality, chat           |
+| Qwen3-1.7B (GGUF Q4) | ~1.3 GB  | ~2 GB         | Secondary — fast, canary / A/B    |
+| Qwen2.5-32B (GGUF Q4)| ~18 GB   | ~23 GB        | Primary (single-model) or flagship|
 
 
 ### Memory Budget (64 GB unified, krunkit full-stack)
@@ -183,29 +177,30 @@ krunkit VM (Kubernetes full stack)
   llm-d (Envoy + EPP scheduler)                ~0.5 GB
   generic-device-plugin                        ~0.1 GB
   ──── Model pods (GGUF 4-bit, GPU) ────
-  Pod 1: 8B model  (llama-server)               ~6 GB
-  Pod 2: 4B model  (llama-server)               ~3 GB
-  Pod 3: 0.5B model (llama-server)              ~1 GB
+  Pod 1: Qwen3-8B   (llama-server)              ~6 GB
+  Pod 2: Qwen3-1.7B (llama-server)               ~2 GB
+  Pod 3: Qwen2.5-32B (llama-server)              ~23 GB
   Pod overhead (containers, networking)          ~2 GB
-                                      VM total: ~18.5 GB
+                                     VM total: ~40 GB
 ─────────────────────────────────────────────────────
 Monitoring (Prometheus + Grafana)               ~1.5 GB
-Headroom                                       ~38 GB
+Headroom                                       ~17 GB
                                                ──────
                                                 64 GB
 ```
 
-~38 GB of headroom means KV caches can grow under concurrent load without pressure.
+With all three models (Qwen3-8B, Qwen3-1.7B, Qwen2.5-32B) the VM uses ~40 GB; ~17 GB headroom allows KV caches to grow under load. For more headroom, run only 8B + 1.7B in-cluster and use 32B natively (see Single-Model Native Setup).
 
 ### Single-Model Native Setup (fallback)
 
-For daily use where full-stack simulation is not needed, run one large model natively with the original ExternalName architecture:
+For daily use where full-stack simulation is not needed, run one large model natively (e.g. mlx-lm or Ollama):
 
 
-| Model                     | Disk   | Active memory | Decode speed |
-| ------------------------- | ------ | ------------- | ------------ |
-| Qwen2.5-32B-Instruct-4bit | ~18 GB | ~23 GB        | ~25–40 tok/s |
-| Qwen2.5-14B-Instruct-4bit | ~8 GB  | ~12 GB        | ~50–70 tok/s |
+| Model                     | Disk    | Active memory | Decode speed   |
+| ------------------------- | ------- | ------------- | -------------- |
+| Qwen2.5-32B (GGUF Q4)     | ~18 GB  | ~23 GB        | ~25–40 tok/s   |
+| Qwen3-8B (GGUF Q4)        | ~5 GB   | ~6 GB         | ~50–80 tok/s   |
+| Qwen3-1.7B (GGUF Q4)      | ~1.3 GB | ~2 GB         | ~100–150 tok/s |
 
 
 ---
@@ -214,7 +209,9 @@ For daily use where full-stack simulation is not needed, run one large model nat
 
 ### KServe InferenceService
 
-Each model is a KServe `InferenceService` CRD. KServe manages the Deployment, Service, and autoscaler for each model.
+Each model is a KServe `InferenceService` CRD. KServe manages the Deployment, Service, and autoscaler for each model. In neural-gate, one InferenceService per model is generated from the Helm template `templates/model-inferenceservice.yaml` using the `models` list in values (set by `setup.sh` option 5).
+
+Conceptually, each entry looks like this (local-krunkit defaults):
 
 ```yaml
 apiVersion: serving.kserve.io/v1beta1
@@ -225,10 +222,10 @@ metadata:
 spec:
   predictor:
     containers:
-    - name: llama-server
+    - name: kserve-container
       image: quay.io/ramalama/ramalama:latest
       command: [llama-server, --host, "0.0.0.0", --port, "8080",
-                --model, /mnt/models/qwen2.5-8b-instruct-q4_k_m.gguf,
+                --model, /mnt/models/qwen3-8b.gguf,
                 -ngl, "999", --ctx-size, "4096"]
       resources:
         limits:
@@ -242,17 +239,17 @@ spec:
         path: /mnt/models
 ```
 
-### llm-d Scheduler
+### llm-d Scheduler (optional)
 
-Deployed between the Gateway and model pods. Routes requests to the pod with the best KV cache hit. Pluggable scorers: KV-cache-aware, prefix-aware, session-aware, load-aware.
+When enabled, llm-d sits between the Gateway and model pods and routes requests to the pod with the best KV cache hit. Pluggable scorers: KV-cache-aware, prefix-aware, session-aware, load-aware.
 
-On GKE with vLLM, llm-d uses vLLM's KV-Events API for precise cache introspection. On the local krunkit path with llama-server, llm-d falls back to load-aware and session-aware routing (still valuable for multi-model serving).
+On GKE with vLLM, llm-d can use vLLM's KV-Events API for precise cache introspection. On the local krunkit path with llama-server, llm-d falls back to load-aware and session-aware routing. In the neural-gate Helm chart, llm-d is **disabled by default** (`llmd.enabled: false` in `values.yaml`); set to `true` when a working EPP image is available.
 
 ### Gateway API
 
-Replaces the nginx Ingress from the original design. Gateway API is the Kubernetes-standard successor to Ingress and is what KServe and llm-d build on.
+Gateway API is the Kubernetes-standard successor to Ingress. neural-gate uses **Envoy Gateway** as the implementation: one Gateway (`inference-gateway`) with `gatewayClassName: envoy`, and one HTTPRoute per model for host-based routing (e.g. `qwen3-1-7b.inference.local` → predictor Service). MetalLB provides a LoadBalancer IP for the Envoy proxy; on macOS the MetalLB IP is often not routable from the host, so use `kubectl port-forward` to a predictor Service or to the Envoy proxy for local access.
 
-Two annotations remain critical for LLM workloads:
+For LLM workloads, ensure:
 
 - **proxy-buffering: off** — required for streaming completions (SSE)
 - **proxy-read-timeout: 300** — 5-minute timeout for long generations
@@ -274,13 +271,13 @@ Prometheus scrapes engine metrics (tokens/s, batch size, queue depth, GPU utiliz
 ### Local (multi-model, krunkit)
 
 
-| Component            | Size      | Notes             |
-| -------------------- | --------- | ----------------- |
-| 8B model (GGUF Q4)   | ~5 GB     | Primary           |
-| 4B model (GGUF Q4)   | ~2.5 GB   | Canary / A/B      |
-| 0.5B model (GGUF Q4) | ~0.5 GB   | Router / prefill  |
-| HF cache overhead    | ~1 GB     | Tokenizer configs |
-| PV total             | **20 Gi** | Rounded up        |
+| Component              | Size      | Notes                    |
+| ---------------------- | --------- | ------------------------- |
+| Qwen3-8B (GGUF Q4)     | ~5 GB     | Primary                   |
+| Qwen3-1.7B (GGUF Q4)    | ~1.3 GB   | Secondary / canary        |
+| Qwen2.5-32B (GGUF Q4)   | ~18 GB    | Flagship / single-model   |
+| HF cache overhead      | ~1 GB     | Tokenizer configs         |
+| PV total               | **26 Gi** | Rounded up                |
 
 
 ### GKE Production
@@ -298,24 +295,22 @@ Weights live on the fastest available persistent storage (NVMe SSD locally, pd-s
 
 ---
 
-## Environment Mapping (Kustomize Overlays)
+## Environment Mapping (Helm Values)
 
-The base manifests (KServe CRDs, Gateway routes, llm-d config, monitoring) are identical across environments. Overlays change only what must differ:
+The same Helm chart (`k8s/neural-gate/`) is used everywhere. Environment differences are expressed via `values.yaml` (defaults) and overrides such as `values-gke.yaml`:
 
+| Component        | `values.yaml` (local-krunkit)    | `values-gke.yaml` (GKE)                 |
+| ---------------- | --------------------------------- | --------------------------------------- |
+| Engine image     | `ramalama:latest` (llama-server)  | `vllm/vllm-openai:latest`               |
+| GPU resource     | `squat.ai/dri: 1`                 | `nvidia.com/gpu: 1`                     |
+| Model format     | GGUF (Q4_K_M)                     | Safetensors (FP8/FP16)                  |
+| PV backend       | hostPath via krunkit mount        | GCE pd-ssd (PVC)                        |
+| Gateway          | Envoy Gateway (MetalLB)           | GKE Gateway or Istio                    |
+| Autoscaler       | HPA (batch size metric)           | HPA + KServe built-in (scale-to-zero)   |
+| llm-d            | Optional (disabled by default)    | Optional; precise KV-cache (vLLM)        |
+| DNS              | `/etc/hosts` → `*.inference.local`| Cloud DNS A record                      |
 
-| Component        | `local-krunkit` overlay          | `gke-production` overlay                |
-| ---------------- | -------------------------------- | --------------------------------------- |
-| Engine image     | `ramalama:latest` (llama-server) | `vllm/vllm-openai:latest`               |
-| GPU resource     | `squat.ai/dri: 1`                | `nvidia.com/gpu: 1`                     |
-| Model format     | GGUF (Q4_K_M)                    | Safetensors (FP8/FP16)                  |
-| PV backend       | hostPath via krunkit mount       | GCE pd-ssd                              |
-| Gateway          | Envoy Gateway (local)            | GKE Gateway or Istio                    |
-| Autoscaler       | HPA (batch size metric)          | HPA + KServe built-in (scale-to-zero)   |
-| llm-d cache mode | Load-aware + session-aware       | Precise KV-cache-aware (vLLM KV-Events) |
-| DNS              | `/etc/hosts` → `inference.local` | Cloud DNS A record                      |
-
-
-A `local-native` overlay is also available as a lightweight fallback: mlx-lm runs on the host as a launchd service, and an ExternalName Service routes cluster traffic to `host.minikube.internal:8000`. This uses the Docker driver (no krunkit) and is simpler but does not simulate the production deployment pattern.
+A future `local-native` option could run mlx-lm on the host with an ExternalName Service to `host.minikube.internal`; that would use the Docker driver (no krunkit) and not simulate the full production deployment pattern.
 
 ---
 
@@ -341,37 +336,31 @@ minikube ssh --profile=inference -- tree /dev/dri
 # Expected: /dev/dri/card0, /dev/dri/renderD128
 ```
 
-### Deploy generic-device-plugin
+### Deploy via setup.sh
 
-Makes `/dev/dri` schedulable as `squat.ai/dri`. Configurable `count` controls how many pods share the GPU (set to match the number of model pods).
+The device plugin, KServe stack, and model deployments are all managed by the interactive setup script:
 
-### Install KServe + llm-d
+1. **Option 4 — Start cluster**  
+   Starts minikube (krunkit, 3 nodes, mount `~/.models:/mnt/models`) and installs KServe infrastructure: cert-manager, Gateway API CRDs, Envoy Gateway, KServe CRDs and controller, MetalLB, and the `envoy` GatewayClass.
 
-```bash
-# KServe standalone (no Kubeflow)
-kubectl apply -f k8s/base/kserve/
+2. **Option 5 — Deploy inference stack**  
+   Runs `helm upgrade --install neural-gate ./k8s/neural-gate/` with `--set` for the models you select from the models directory. This creates the namespace, device-plugin DaemonSet, InferenceServices, Gateway, HTTPRoutes, and monitoring ConfigMaps.
 
-# llm-d scheduler
-kubectl apply -f k8s/base/llm-d/
+3. **Option 6 — Configure ingress**  
+   Ensures the Gateway has a LoadBalancer IP (MetalLB) and adds `*.inference.local` to `/etc/hosts`. On macOS, the MetalLB IP is often not routable from the host; use port-forward to reach predictors (see below).
 
-# Gateway API
-kubectl apply -f k8s/base/gateway/
-```
-
-### Apply local overlay
+4. **Reach a model from the host**  
+   Port-forward to a predictor Service, then call the OpenAI-compatible API on localhost:
 
 ```bash
-kubectl apply -k k8s/overlays/local-krunkit/
-```
-
-### Smoke test
-
-```bash
-curl -s http://inference.local/v1/models
-curl -s http://inference.local/v1/chat/completions \
+kubectl port-forward -n inference svc/qwen3-1-7b-predictor 8081:80
+curl -s http://127.0.0.1:8081/v1/models
+curl -s http://127.0.0.1:8081/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen-8b","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"qwen3-1-7b","messages":[{"role":"user","content":"hello"}]}'
 ```
+
+See [mac_runbook.md](mac_runbook.md) for full setup and smoke-test steps.
 
 ---
 
@@ -406,51 +395,37 @@ The throughput differs, but every K8s manifest, every CRD, every routing rule, e
 
 ## Deployment Files (in neural-gate repo)
 
+All Kubernetes resources are defined in the Helm chart. Model InferenceServices and HTTPRoutes are generated from the `models` list in values (populated by `setup.sh` via `--set`).
+
 ```
 neural-gate/
-├── k8s/
-│   ├── base/
-│   │   ├── namespace.yaml
-│   │   ├── kserve/
-│   │   │   ├── qwen-8b.yaml          # InferenceService CRD
-│   │   │   ├── qwen-4b.yaml
-│   │   │   └── qwen-05b.yaml
-│   │   ├── llm-d/
-│   │   │   ├── envoy-config.yaml
-│   │   │   └── epp-deployment.yaml
-│   │   ├── gateway/
-│   │   │   ├── gateway.yaml
-│   │   │   └── httproute.yaml
-│   │   ├── device-plugin/
-│   │   │   └── daemonset.yaml
-│   │   └── monitoring/
-│   │       ├── prometheus-rules.yaml
-│   │       └── grafana-dashboard.json
-│   ├── overlays/
-│   │   ├── local-krunkit/
-│   │   │   └── kustomization.yaml     # llama-server image, squat.ai/dri, hostPath
-│   │   ├── local-native/
-│   │   │   └── kustomization.yaml     # ExternalName to host.minikube.internal
-│   │   └── gke-production/
-│   │       └── kustomization.yaml     # vLLM image, nvidia.com/gpu, pd-ssd
-│   └── models/
-│       ├── qwen2.5-8b-q4.yaml
-│       ├── qwen2.5-4b-q4.yaml
-│       └── qwen2.5-05b-q4.yaml
-├── native/
-│   ├── start-inference.sh
-│   └── com.inference.mlx-server.plist
+├── k8s/neural-gate/
+│   ├── Chart.yaml
+│   ├── values.yaml                   # Local-krunkit defaults (llama-server, squat.ai/dri)
+│   ├── values-gke.yaml               # GKE overrides (vLLM, nvidia.com/gpu, PVC)
+│   └── templates/
+│       ├── _helpers.tpl
+│       ├── namespace.yaml
+│       ├── device-plugin.yaml        # generic-device-plugin DaemonSet
+│       ├── model-inferenceservice.yaml   # InferenceService per model
+│       ├── gateway.yaml
+│       ├── httproute.yaml            # HTTPRoute per model
+│       ├── llm-d/
+│       │   ├── envoy-config.yaml
+│       │   └── epp-deployment.yaml
+│       └── monitoring/
+│           ├── prometheus-rules.yaml
+│           └── grafana-dashboard.yaml
 ├── scripts/
-│   ├── setup.sh                       # Install krunkit, vmnet-helper, KServe, llm-d
-│   ├── smoke-test.sh                  # Health + completions + model list
-│   └── benchmark.sh                   # Throughput measurement
+│   ├── setup.sh                      # Cluster, KServe infra, Helm deploy, ingress
+│   ├── smoke-test.sh
+│   └── benchmark.sh
 ├── docs/
-│   └── design.md                      # This document
-└── Makefile
-    # make local-up       → krunkit start + deploy base + local overlay
-    # make local-native   → docker driver + deploy base + native overlay
-    # make gke-deploy     → deploy base + gke overlay
-    # make smoke-test     → health + completions
-    # make benchmark      → throughput test
+│   ├── Inference_design.md           # This document
+│   ├── Infrastructure_design.md      # Helm chart, KServe, Gateway API
+│   └── mac_runbook.md                # macOS setup and smoke test
+└── requirements.txt                  # e.g. huggingface-hub for model download
 ```
+
+Workflow: run `./scripts/setup.sh`, use options 4 (start cluster + KServe), 5 (Helm deploy with selected models), 6 (ingress /etc/hosts). See [Infrastructure_design.md](Infrastructure_design.md) for chart values and deployment details.
 
