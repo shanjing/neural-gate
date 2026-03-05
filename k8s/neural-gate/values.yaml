@@ -1,0 +1,50 @@
+# neural-gate Helm values — defaults target local-krunkit (Apple Silicon minikube)
+
+namespace: inference
+
+engine:
+  image: quay.io/ramalama/ramalama:latest
+  command: [llama-server, --host, "0.0.0.0", --port, "8080"]
+  extraArgs: [-ngl, "999", --ctx-size, "4096"]
+  gpu:
+    resource: squat.ai/dri
+    count: 1
+
+# Models to deploy — populated by setup.sh option 5 via --set
+# Each entry becomes a KServe InferenceService
+models: []
+# Example:
+# - name: qwen3-8b
+#   ggufFile: qwen3-8b.gguf
+#   cpu:
+#     request: "2"
+#     limit: "4"
+#   memory:
+#     request: 4Gi
+#     limit: 8Gi
+
+gateway:
+  enabled: true
+  className: envoy
+  hostname: inference.local
+
+monitoring:
+  enabled: true
+  rules:
+    p99LatencyThreshold: 10
+    kvCacheUtilThreshold: 90
+
+# llm-d EPP scheduler (optional). Set to true when a working EPP image is available.
+llmd:
+  enabled: false
+
+devicePlugin:
+  enabled: true
+  image: squat/generic-device-plugin
+  dri:
+    count: 1
+
+volumes:
+  modelsPath: /mnt/models
+  # local: hostPath, gke: PVC
+  type: hostPath

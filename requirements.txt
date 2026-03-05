@@ -1,0 +1,18 @@
+# neural-gate — Python dependencies
+# Install: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+
+# Model downloads from Hugging Face
+huggingface-hub>=0.20.0
+
+# OpenAI-compatible client for integration testing
+openai>=1.0.0
+
+# HTTP client for scripting and health checks
+httpx>=0.27.0
+
+# MLX-based inference server (Apple Silicon, Metal GPU — native fallback path only)
+# Uncomment if using the native path (option: make local-native)
+# mlx-lm>=0.22.0
+
+# vLLM-MLX (paged KV + batching on Metal, sub-v1.0)
+# vllm-mlx

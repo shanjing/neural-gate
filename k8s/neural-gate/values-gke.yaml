@@ -1,0 +1,24 @@
+# neural-gate Helm values — GKE production overlay
+
+engine:
+  image: vllm/vllm-openai:latest
+  command: [python3, -m, vllm.entrypoints.openai.api_server]
+  extraArgs: [--host, "0.0.0.0", --port, "8080"]
+  gpu:
+    resource: nvidia.com/gpu
+    count: 1
+
+gateway:
+  enabled: true
+  className: gke-l7-global-external-managed
+  hostname: inference.example.com
+
+devicePlugin:
+  enabled: false
+
+volumes:
+  modelsPath: /mnt/models
+  type: pvc
+  pvc:
+    storageClass: pd-ssd
+    size: 300Gi

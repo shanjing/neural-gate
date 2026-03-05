@@ -1,0 +1,53 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-inference-dashboard
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "neural-gate.labels" . | nindent 4 }}
+    grafana_dashboard: "true"
+data:
+  inference-dashboard.json: |
+    {
+      "dashboard": {
+        "title": "neural-gate Inference",
+        "uid": "neural-gate-inference",
+        "panels": [
+          {
+            "title": "Token Throughput (tok/s)",
+            "type": "timeseries",
+            "targets": [{"expr": "inference:tokens_per_second:rate5m"}],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+          },
+          {
+            "title": "KV Cache Utilization (%)",
+            "type": "gauge",
+            "targets": [{"expr": "kv_cache_usage_ratio * 100"}],
+            "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0}
+          },
+          {
+            "title": "Concurrent Requests",
+            "type": "stat",
+            "targets": [{"expr": "inference:requests_concurrent"}],
+            "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0}
+          },
+          {
+            "title": "Request Latency P50 / P99",
+            "type": "timeseries",
+            "targets": [
+              {"expr": "histogram_quantile(0.5, rate(inference_request_duration_seconds_bucket[5m]))", "legendFormat": "P50"},
+              {"expr": "histogram_quantile(0.99, rate(inference_request_duration_seconds_bucket[5m]))", "legendFormat": "P99"}
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+          },
+          {
+            "title": "Time to First Token (TTFT)",
+            "type": "timeseries",
+            "targets": [{"expr": "histogram_quantile(0.99, rate(inference_ttft_seconds_bucket[5m]))"}],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+          }
+        ]
+      }
+    }
+{{- end }}

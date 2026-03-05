@@ -1,0 +1,56 @@
+{{- if .Values.llmd.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: epp-scheduler
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "neural-gate.labels" . | nindent 4 }}
+    app: epp-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: epp-scheduler
+  template:
+    metadata:
+      labels:
+        app: epp-scheduler
+    spec:
+      containers:
+      - name: epp
+        image: ghcr.io/kubernetes-sigs/llm-d/epp:latest
+        ports:
+        - name: grpc
+          containerPort: 9002
+        - name: metrics
+          containerPort: 9090
+        env:
+        - name: POOL_NAMESPACE
+          value: {{ .Values.namespace }}
+        resources:
+          requests:
+            cpu: "250m"
+            memory: 256Mi
+          limits:
+            cpu: "500m"
+            memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: epp-scheduler
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "neural-gate.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: epp-scheduler
+  ports:
+  - name: grpc
+    port: 9002
+    targetPort: 9002
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+{{- end }}

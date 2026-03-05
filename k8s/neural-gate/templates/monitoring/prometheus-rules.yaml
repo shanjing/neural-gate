@@ -1,0 +1,35 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-inference-rules
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "neural-gate.labels" . | nindent 4 }}
+    prometheus: inference
+data:
+  inference-rules.yaml: |
+    groups:
+    - name: inference.rules
+      rules:
+      - alert: HighP99Latency
+        expr: histogram_quantile(0.99, rate(inference_request_duration_seconds_bucket[5m])) > {{ .Values.monitoring.rules.p99LatencyThreshold }}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P99 inference latency exceeds {{ .Values.monitoring.rules.p99LatencyThreshold }}s"
+          description: "Model {{`{{ $labels.model_name }}`}} P99 latency is {{`{{ $value }}`}}s."
+      - alert: KVCacheUtilizationHigh
+        expr: kv_cache_usage_ratio * 100 > {{ .Values.monitoring.rules.kvCacheUtilThreshold }}
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV cache utilization above {{ .Values.monitoring.rules.kvCacheUtilThreshold }}%"
+          description: "Model {{`{{ $labels.model_name }}`}} KV cache at {{`{{ $value }}`}}%."
+      - record: inference:tokens_per_second:rate5m
+        expr: rate(inference_tokens_total[5m])
+      - record: inference:requests_concurrent
+        expr: sum(inference_requests_in_progress) by (model_name)
+{{- end }}

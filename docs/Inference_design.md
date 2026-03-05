@@ -1,6 +1,6 @@
 # Inference Stack Design
 
-**Scope:** A production-grade inference stack that runs locally on a Mac Mini and deploys to GKE/AWS with minimal changes. This is a **separate project** (`inference-stack` repo) that serves all agentic apps (Draft, MarginCall, etc.) via an OpenAI-compatible API.
+**Scope:** A production-grade inference stack that runs locally on a Mac Mini and deploys to GKE/AWS with minimal changes. This is a **separate project** (`neural-gate` repo) that serves all agentic apps (Draft, MarginCall, etc.) via an OpenAI-compatible API.
 
 The [intelligence layer design](intelligence-layer-design.md) describes how the Draft app consumes the inference endpoint for RAG and Ask.
 
@@ -52,7 +52,7 @@ In production, the inference cluster is a separate concern from any application:
 If inference lives inside Draft, every other app (MarginCall, aimee, future agents) depends on Draft to get an LLM endpoint. A separate repo makes the OpenAI API the only contract:
 
 ```
-inference-stack (separate repo)          Draft / MarginCall / aimee
+neural-gate (separate repo)              Draft / MarginCall / aimee
 ─────────────────────────────────        ────────────────────────────
 Owns: GPU, models, KServe,              Owns: app logic, RAG, UI
       scheduling, scaling               Consumes: LLM_ENDPOINT
@@ -63,7 +63,7 @@ Exposes: /v1/chat/completions           (one env var, same for all apps)
 ### Repo Layout
 
 ```
-inference-stack/
+neural-gate/
 ├── k8s/
 │   ├── base/                        # Kustomize base (engine-agnostic)
 │   │   ├── namespace.yaml
@@ -89,10 +89,12 @@ inference-stack/
 
 Kubernetes requires Linux. Every "K8s on Mac" solution runs Linux in a VM. The critical question is whether that VM can access the Mac's GPU.
 
-| Minikube driver | VM technology | GPU passthrough? |
-| --------------- | ------------- | ---------------- |
-| docker          | Docker Desktop Linux VM | No — no Metal in VM |
+
+| Minikube driver | VM technology                  | GPU passthrough?            |
+| --------------- | ------------------------------ | --------------------------- |
+| docker          | Docker Desktop Linux VM        | No — no Metal in VM         |
 | krunkit         | Apple Virtualization.framework | **Yes** — virtio-gpu device |
+
 
 The **krunkit driver** uses Apple's native Virtualization.framework and exposes the host GPU as `/dev/dri` (virtio-gpu) inside the VM. A `generic-device-plugin` DaemonSet makes it schedulable as a K8s resource (`squat.ai/dri`). Pods request GPU access via standard resource limits.
 
@@ -102,7 +104,7 @@ Requirements: Apple Silicon, macOS 14+, minikube v1.37.0+, krunkit v1.0.0+, vmne
 brew tap slp/krunkit && brew install krunkit
 curl -fsSL https://github.com/minikube-machine/vmnet-helper/releases/latest/download/install.sh | bash
 
-minikube start --driver krunkit --mount-string ~/models:/mnt/models
+minikube start --driver krunkit --mount-string ~/.models:/mnt/models
 ```
 
 The virtio-gpu device provides Vulkan-level GPU compute. llama-server (llama.cpp) uses this via its Vulkan backend with `-ngl 999` (offload all layers to GPU). This enables model inference **inside K8s pods with GPU acceleration** — the same Deployment/Service/Ingress pattern as GKE.
@@ -121,23 +123,27 @@ Apple's Metal framework has no container GPU passthrough. Docker's own vllm-meta
 
 ### Engine Options by Environment
 
-| Engine | Hardware | GPU API | Format | In K8s pod? | Use case |
-| ------ | -------- | ------- | ------ | ----------- | -------- |
-| llama-server (llama.cpp) | Apple Silicon (krunkit) | Vulkan via virtio-gpu | GGUF | **Yes** | Local: production-like K8s simulation |
-| vLLM | NVIDIA GPU | CUDA | Safetensors | **Yes** | GKE/EKS production |
-| TensorRT-LLM | NVIDIA GPU | CUDA | TRT engine | **Yes** | GKE/EKS max throughput |
-| TGI | NVIDIA GPU | CUDA | Safetensors | **Yes** | GKE/EKS simple ops |
+
+| Engine                   | Hardware                | GPU API               | Format      | In K8s pod? | Use case                              |
+| ------------------------ | ----------------------- | --------------------- | ----------- | ----------- | ------------------------------------- |
+| llama-server (llama.cpp) | Apple Silicon (krunkit) | Vulkan via virtio-gpu | GGUF        | **Yes**     | Local: production-like K8s simulation |
+| vLLM                     | NVIDIA GPU              | CUDA                  | Safetensors | **Yes**     | GKE/EKS production                    |
+| TensorRT-LLM             | NVIDIA GPU              | CUDA                  | TRT engine  | **Yes**     | GKE/EKS max throughput                |
+| TGI                      | NVIDIA GPU              | CUDA                  | Safetensors | **Yes**     | GKE/EKS simple ops                    |
+
 
 ### Native-Only Engines (fallback / daily use)
 
 These run as macOS processes, not inside K8s. Use with ExternalName Service when full-stack simulation is not needed.
 
-| Engine | Status | Notes |
-| ------ | ------ | ----- |
-| mlx-lm | Stable | Current setup. Native Metal, 20 GPU cores. Simple. |
-| vLLM-MLX | Sub-v1.0 (2025) | vLLM-like scheduling (paged KV, batching) + MLX. Multimodal. `pip install vllm-mlx`. Benchmarks: 525 tok/s Qwen3-0.6B 4-bit on M4 Max. |
-| vLLM-Metal | Sub-v1.0 (2026) | Official vLLM plugin, co-developed with Docker. Text-only, no published benchmarks yet. Docker Model Runner integration. |
-| Ollama | Stable | Wraps llama.cpp. Easiest setup, slightly lower throughput. |
+
+| Engine     | Status          | Notes                                                                                                                                  |
+| ---------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| mlx-lm     | Stable          | Current setup. Native Metal, 20 GPU cores. Simple.                                                                                     |
+| vLLM-MLX   | Sub-v1.0 (2025) | vLLM-like scheduling (paged KV, batching) + MLX. Multimodal. `pip install vllm-mlx`. Benchmarks: 525 tok/s Qwen3-0.6B 4-bit on M4 Max. |
+| vLLM-Metal | Sub-v1.0 (2026) | Official vLLM plugin, co-developed with Docker. Text-only, no published benchmarks yet. Docker Model Runner integration.               |
+| Ollama     | Stable          | Wraps llama.cpp. Easiest setup, slightly lower throughput.                                                                             |
+
 
 All native engines use Metal GPU directly. Switching between them is a process swap on port 8000 (stop one launchd service, start another). The K8s ExternalName Service, Ingress, and app config don't change.
 
@@ -157,11 +163,13 @@ The server must bind to `0.0.0.0`, not `127.0.0.1`. Cluster nodes reach the host
 
 Running multiple models inside K8s pods exercises KServe multi-model serving, canary rollouts, and llm-d routing — the patterns that matter in production.
 
-| Model | Disk | Active memory | Role |
-| ----- | ---- | ------------- | ---- |
-| 8B-4bit (e.g. Qwen2.5-8B-Instruct) | ~5 GB | ~6 GB | Primary — quality |
-| 4B-4bit (e.g. Qwen2.5-4B-Instruct) | ~2.5 GB | ~3 GB | Secondary — A/B testing, canary |
-| 0.5B-4bit (e.g. Qwen2.5-0.5B) | ~0.5 GB | ~1 GB | Router / prefill worker / fallback |
+
+| Model                              | Disk    | Active memory | Role                               |
+| ---------------------------------- | ------- | ------------- | ---------------------------------- |
+| 8B-4bit (e.g. Qwen2.5-8B-Instruct) | ~5 GB   | ~6 GB         | Primary — quality                  |
+| 4B-4bit (e.g. Qwen2.5-4B-Instruct) | ~2.5 GB | ~3 GB         | Secondary — A/B testing, canary    |
+| 0.5B-4bit (e.g. Qwen2.5-0.5B)      | ~0.5 GB | ~1 GB         | Router / prefill worker / fallback |
+
 
 ### Memory Budget (64 GB unified, krunkit full-stack)
 
@@ -193,10 +201,12 @@ Headroom                                       ~38 GB
 
 For daily use where full-stack simulation is not needed, run one large model natively with the original ExternalName architecture:
 
-| Model | Disk | Active memory | Decode speed |
-| ----- | ---- | ------------- | ------------ |
-| Qwen2.5-32B-Instruct-4bit | ~18 GB | ~23 GB | ~25–40 tok/s |
-| Qwen2.5-14B-Instruct-4bit | ~8 GB | ~12 GB | ~50–70 tok/s |
+
+| Model                     | Disk   | Active memory | Decode speed |
+| ------------------------- | ------ | ------------- | ------------ |
+| Qwen2.5-32B-Instruct-4bit | ~18 GB | ~23 GB        | ~25–40 tok/s |
+| Qwen2.5-14B-Instruct-4bit | ~8 GB  | ~12 GB        | ~50–70 tok/s |
+
 
 ---
 
@@ -243,6 +253,7 @@ On GKE with vLLM, llm-d uses vLLM's KV-Events API for precise cache introspectio
 Replaces the nginx Ingress from the original design. Gateway API is the Kubernetes-standard successor to Ingress and is what KServe and llm-d build on.
 
 Two annotations remain critical for LLM workloads:
+
 - **proxy-buffering: off** — required for streaming completions (SSE)
 - **proxy-read-timeout: 300** — 5-minute timeout for long generations
 
@@ -262,22 +273,26 @@ Prometheus scrapes engine metrics (tokens/s, batch size, queue depth, GPU utiliz
 
 ### Local (multi-model, krunkit)
 
-| Component | Size | Notes |
-| --------- | ---- | ----- |
-| 8B model (GGUF Q4) | ~5 GB | Primary |
-| 4B model (GGUF Q4) | ~2.5 GB | Canary / A/B |
-| 0.5B model (GGUF Q4) | ~0.5 GB | Router / prefill |
-| HF cache overhead | ~1 GB | Tokenizer configs |
-| PV total | **20 Gi** | Rounded up |
+
+| Component            | Size      | Notes             |
+| -------------------- | --------- | ----------------- |
+| 8B model (GGUF Q4)   | ~5 GB     | Primary           |
+| 4B model (GGUF Q4)   | ~2.5 GB   | Canary / A/B      |
+| 0.5B model (GGUF Q4) | ~0.5 GB   | Router / prefill  |
+| HF cache overhead    | ~1 GB     | Tokenizer configs |
+| PV total             | **20 Gi** | Rounded up        |
+
 
 ### GKE Production
 
-| Component | Size | Notes |
-| --------- | ---- | ----- |
-| Primary model (70B FP8) | ~70 GB | Multi-GPU tensor parallel |
-| Secondary model slot | ~70 GB | A/B testing |
-| HF cache overhead | ~5 GB | |
-| PV total | **300 Gi** | pd-ssd |
+
+| Component               | Size       | Notes                     |
+| ----------------------- | ---------- | ------------------------- |
+| Primary model (70B FP8) | ~70 GB     | Multi-GPU tensor parallel |
+| Secondary model slot    | ~70 GB     | A/B testing               |
+| HF cache overhead       | ~5 GB      |                           |
+| PV total                | **300 Gi** | pd-ssd                    |
+
 
 Weights live on the fastest available persistent storage (NVMe SSD locally, pd-ssd on GKE).
 
@@ -287,16 +302,18 @@ Weights live on the fastest available persistent storage (NVMe SSD locally, pd-s
 
 The base manifests (KServe CRDs, Gateway routes, llm-d config, monitoring) are identical across environments. Overlays change only what must differ:
 
-| Component | `local-krunkit` overlay | `gke-production` overlay |
-| --------- | ----------------------- | ------------------------ |
-| Engine image | `ramalama:latest` (llama-server) | `vllm/vllm-openai:latest` |
-| GPU resource | `squat.ai/dri: 1` | `nvidia.com/gpu: 1` |
-| Model format | GGUF (Q4_K_M) | Safetensors (FP8/FP16) |
-| PV backend | hostPath via krunkit mount | GCE pd-ssd |
-| Gateway | Envoy Gateway (local) | GKE Gateway or Istio |
-| Autoscaler | HPA (batch size metric) | HPA + KServe built-in (scale-to-zero) |
-| llm-d cache mode | Load-aware + session-aware | Precise KV-cache-aware (vLLM KV-Events) |
-| DNS | `/etc/hosts` → `inference.local` | Cloud DNS A record |
+
+| Component        | `local-krunkit` overlay          | `gke-production` overlay                |
+| ---------------- | -------------------------------- | --------------------------------------- |
+| Engine image     | `ramalama:latest` (llama-server) | `vllm/vllm-openai:latest`               |
+| GPU resource     | `squat.ai/dri: 1`                | `nvidia.com/gpu: 1`                     |
+| Model format     | GGUF (Q4_K_M)                    | Safetensors (FP8/FP16)                  |
+| PV backend       | hostPath via krunkit mount       | GCE pd-ssd                              |
+| Gateway          | Envoy Gateway (local)            | GKE Gateway or Istio                    |
+| Autoscaler       | HPA (batch size metric)          | HPA + KServe built-in (scale-to-zero)   |
+| llm-d cache mode | Load-aware + session-aware       | Precise KV-cache-aware (vLLM KV-Events) |
+| DNS              | `/etc/hosts` → `inference.local` | Cloud DNS A record                      |
+
 
 A `local-native` overlay is also available as a lightweight fallback: mlx-lm runs on the host as a launchd service, and an ExternalName Service routes cluster traffic to `host.minikube.internal:8000`. This uses the Docker driver (no krunkit) and is simpler but does not simulate the production deployment pattern.
 
@@ -313,7 +330,7 @@ A `local-native` overlay is also available as a lightweight fallback: mlx-lm run
 ```bash
 minikube start \
   --driver=krunkit \
-  --mount-string ~/models:/mnt/models \
+  --mount-string ~/.models:/mnt/models \
   --profile=inference
 ```
 
@@ -371,24 +388,26 @@ curl -s http://inference.local/v1/chat/completions \
 
 ### What Differs from Production
 
-| Aspect | Local | GKE/EKS |
-| ------ | ----- | ------- |
-| GPU type | virtio-gpu (Vulkan via krunkit) | NVIDIA A100/H100 (CUDA) |
-| Engine | llama-server (llama.cpp) | vLLM or TensorRT-LLM |
-| Model format | GGUF | Safetensors / TRT engine |
-| Throughput | ~25–70 tok/s per model | ~3,000+ tok/s per node |
-| Tensor parallelism | No (single GPU) | Yes (multi-GPU NVLink) |
-| Node count | 1 | N GPU nodes |
-| llm-d precision | Load-aware (no KV-Events from llama-server) | Precise KV-cache-aware (vLLM) |
+
+| Aspect             | Local                                       | GKE/EKS                       |
+| ------------------ | ------------------------------------------- | ----------------------------- |
+| GPU type           | virtio-gpu (Vulkan via krunkit)             | NVIDIA A100/H100 (CUDA)       |
+| Engine             | llama-server (llama.cpp)                    | vLLM or TensorRT-LLM          |
+| Model format       | GGUF                                        | Safetensors / TRT engine      |
+| Throughput         | ~25–70 tok/s per model                      | ~3,000+ tok/s per node        |
+| Tensor parallelism | No (single GPU)                             | Yes (multi-GPU NVLink)        |
+| Node count         | 1                                           | N GPU nodes                   |
+| llm-d precision    | Load-aware (no KV-Events from llama-server) | Precise KV-cache-aware (vLLM) |
+
 
 The throughput differs, but every K8s manifest, every CRD, every routing rule, every autoscaling policy, every canary configuration is identical.
 
 ---
 
-## Deployment Files (in inference-stack repo)
+## Deployment Files (in neural-gate repo)
 
 ```
-inference-stack/
+neural-gate/
 ├── k8s/
 │   ├── base/
 │   │   ├── namespace.yaml
@@ -434,3 +453,4 @@ inference-stack/
     # make smoke-test     → health + completions
     # make benchmark      → throughput test
 ```
+

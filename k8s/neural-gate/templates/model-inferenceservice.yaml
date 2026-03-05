@@ -1,0 +1,63 @@
+{{- range .Values.models }}
+{{- $modelName := include "neural-gate.modelName" .name }}
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: {{ $modelName }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "neural-gate.labels" $ | nindent 4 }}
+    neural-gate/role: model-server
+    neural-gate/model: {{ $modelName }}
+spec:
+  predictor:
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              neural-gate/role: model-server
+          topologyKey: kubernetes.io/hostname
+    containers:
+    - name: inference-engine
+      image: {{ $.Values.engine.image }}
+      command:
+        {{- toYaml $.Values.engine.command | nindent 8 }}
+      args:
+        - --model
+        - {{ $.Values.volumes.modelsPath }}/{{ .ggufFile }}
+        {{- range $.Values.engine.extraArgs }}
+        - {{ . | quote }}
+        {{- end }}
+      ports:
+      - name: http
+        containerPort: 8080
+        protocol: TCP
+      resources:
+        requests:
+          cpu: {{ .cpu.request | default "2" | quote }}
+          memory: {{ .memory.request | default "4Gi" }}
+        limits:
+          cpu: {{ .cpu.limit | default "4" | quote }}
+          memory: {{ .memory.limit | default "8Gi" }}
+          {{ $.Values.engine.gpu.resource }}: {{ $.Values.engine.gpu.count }}
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 10
+      volumeMounts:
+      - name: models
+        mountPath: {{ $.Values.volumes.modelsPath }}
+    volumes:
+    - name: models
+      {{- if eq $.Values.volumes.type "hostPath" }}
+      hostPath:
+        path: {{ $.Values.volumes.modelsPath }}
+      {{- else }}
+      persistentVolumeClaim:
+        claimName: model-weights
+      {{- end }}
+{{- end }}
