@@ -62,7 +62,7 @@ show_current_state() {
     echo -e "  Models dir: ${RED}not configured${RESET}"
   fi
 
-  # CLI tools
+  # CLI tools (minikube, kubectl, krunkit, helm, helm-diff)
   local tools_ok=0 tools_missing=0
   for tool in minikube kubectl krunkit helm; do
     if command -v "$tool" &>/dev/null; then
@@ -71,10 +71,15 @@ show_current_state() {
       tools_missing=$((tools_missing + 1))
     fi
   done
+  if command -v helm &>/dev/null && helm plugin list 2>/dev/null | grep -q 'diff'; then
+    tools_ok=$((tools_ok + 1))
+  elif command -v helm &>/dev/null; then
+    tools_missing=$((tools_missing + 1))
+  fi
   if [ "$tools_missing" -eq 0 ]; then
-    echo -e "  CLI tools : ${GREEN}all installed${RESET} (minikube, kubectl, krunkit, helm)"
+    echo -e "  CLI tools : ${GREEN}all installed${RESET} (minikube, kubectl, krunkit, helm, helm-diff)"
   else
-    echo -e "  CLI tools : ${YELLOW}${tools_missing} missing${RESET}"
+    echo -e "  CLI tools : ${YELLOW}${tools_missing} missing${RESET} (minikube, kubectl, krunkit, helm, helm-diff)"
   fi
 
   # vmnet-helper
@@ -116,13 +121,24 @@ show_current_state() {
       echo -e "  Models    : ${GREEN}$isvc_count InferenceService(s)${RESET}"
       while IFS= read -r isvc_line; do
         [ -z "$isvc_line" ] && continue
-        local iname iready
+        local iname iready iage ctx_size
         iname=$(echo "$isvc_line" | awk '{print $1}')
         iready=$(echo "$isvc_line" | awk '{print $2}')
+        iage=$(echo "$isvc_line" | awk '{print $NF}')
+        ctx_size=$(kubectl get inferenceservice "$iname" -n inference -o json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    args = d.get('spec', {}).get('predictor', {}).get('containers', [{}])[0].get('args', [])
+    i = args.index('--ctx-size') if '--ctx-size' in args else -1
+    print(args[i+1] if i >= 0 and i+1 < len(args) else '4096')
+except Exception:
+    print('4096')
+" 2>/dev/null || echo "4096")
         if [ "$iready" = "True" ]; then
-          echo -e "              ${GREEN}$iname${RESET} (Ready)"
+          echo -e "              ${GREEN}$iname${RESET} ($iage) context size: $ctx_size"
         else
-          echo -e "              ${YELLOW}$iname${RESET} ($iready)"
+          echo -e "              ${YELLOW}$iname${RESET} ($iage) context size: $ctx_size"
         fi
       done <<< "$isvc_lines"
     else
@@ -157,8 +173,29 @@ show_current_state() {
     echo -e "  Gateway   : ${DIM}not configured (run option 6 after deploying)${RESET}"
   fi
 
-  # Version
-  echo -e "  Version   : ${DIM}🍎 macOS setup${RESET}"
+  # Version — host OS, RAM, GPU count (actual count from system_profiler)
+  local host_os host_ram host_gpu version_str gpu_count chip
+  host_os=$(sw_vers -productVersion 2>/dev/null || echo "—")
+  if [ -n "$host_os" ] && [ "$host_os" != "—" ]; then
+    host_ram=$( (sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.0f GB", $1/1024/1024/1024}') || echo "—")
+    gpu_count=1
+    if command -v system_profiler &>/dev/null; then
+      gpu_count=$(system_profiler SPDisplaysDataType 2>/dev/null | grep -c "Chipset Model" 2>/dev/null || echo "0")
+      [ -z "$gpu_count" ] || [ "$gpu_count" -eq 0 ] 2>/dev/null && gpu_count=1
+      chip=$(system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/^[[:space:]]*Chip:/ {print $2; exit}')
+      if [ -n "$chip" ]; then
+        [ "$gpu_count" -eq 1 ] && host_gpu="1 GPU ($chip)" || host_gpu="${gpu_count} GPUs ($chip)"
+      else
+        [ "$gpu_count" -eq 1 ] && host_gpu="1 GPU" || host_gpu="${gpu_count} GPUs"
+      fi
+    else
+      host_gpu="1 GPU"
+    fi
+    [ "$host_ram" = "—" ] && version_str="🍎 macOS $host_os | — RAM | $host_gpu" || version_str="🍎 macOS $host_os | $host_ram RAM | $host_gpu"
+  else
+    version_str="🍎 macOS setup"
+  fi
+  echo -e "  Version   : ${DIM}${version_str}${RESET}"
 
   echo ""
 }
@@ -202,6 +239,13 @@ show_actions() {
   if [ -n "$missing_tools" ]; then
     echo -e "  ${YELLOW}[required] Install missing CLI tools in option 2:${missing_tools}.${RESET}"
     echo -e "  ${YELLOW}[reason]   Cannot start the cluster without these tools.${RESET}"
+    has_required=1
+  fi
+
+  # helm-diff plugin (required for option 5 plan view)
+  if command -v helm &>/dev/null && ! helm plugin list 2>/dev/null | grep -q 'diff'; then
+    echo -e "  ${YELLOW}[required] Install helm-diff plugin in option 2 (Install CLI tools).${RESET}"
+    echo -e "  ${YELLOW}[reason]   Option 5 (Deploy) needs helm-diff for the plan view.${RESET}"
     has_required=1
   fi
 
@@ -450,6 +494,17 @@ do_install_tools() {
     echo -e "  Installing helm via Homebrew..."
     brew install helm
     ok "helm installed"
+  fi
+
+  if helm plugin list 2>/dev/null | grep -q 'diff'; then
+    ok "helm-diff plugin already installed"
+  else
+    echo -e "  Installing helm-diff plugin..."
+    if python3 "$SCRIPT_DIR/scripts/install_tools.py" helm-diff; then
+      ok "helm-diff plugin installed"
+    else
+      warn "Could not install helm-diff. Install manually: helm plugin install https://github.com/databus23/helm-diff --verify=false"
+    fi
   fi
   echo ""
 }
@@ -915,8 +970,8 @@ for m in data.get('models', []):
   fi
 
   echo ""
-  echo -e "  Enter model numbers (comma-separated, e.g. 1,2), ${DIM}A${RESET} for all undeployed, ${DIM}Enter${RESET} to go back.\n"
-  read -r -p "  Deploy models: " model_choice
+  echo -e "  Enter ${BOLD}one${RESET} model number to deploy (1–${#available_gguf[@]}), ${DIM}Enter${RESET} to go back.\n"
+  read -r -p "  Deploy model: " model_choice
   model_choice="$(echo "$model_choice" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
 
   if [ -z "$model_choice" ]; then
@@ -924,29 +979,16 @@ for m in data.get('models', []):
     return
   fi
 
+  # Take only the first number so we deploy one model at a time
   local -a selected_indices=()
-  if [ "$(echo "$model_choice" | tr '[:upper:]' '[:lower:]')" = "a" ]; then
-    for i in $(seq 1 ${#available_gguf[@]}); do
-      local gguf_name="${available_gguf[$((i - 1))]}"
-      local k8s_name
-      k8s_name=$(model_to_k8s_name "$gguf_name")
-      local already=0
-      if [ ${#deployed_models[@]} -gt 0 ]; then
-        for d in "${deployed_models[@]}"; do
-          if [ "$d" = "$k8s_name" ]; then already=1; break; fi
-        done
-      fi
-      if [ "$already" -eq 0 ]; then
-        selected_indices+=("$i")
-      fi
-    done
-    if [ ${#selected_indices[@]} -eq 0 ]; then
-      ok "All models are already deployed."
-      echo ""
-      return
-    fi
+  local first_num
+  first_num=$(echo "$model_choice" | sed 's/,.*//' | tr -d ' ')
+  if [[ "$first_num" =~ ^[0-9]+$ ]]; then
+    selected_indices=("$first_num")
   else
-    IFS=',' read -ra selected_indices <<< "$model_choice"
+    fail "Enter a single model number (1–${#available_gguf[@]})."
+    echo ""
+    return
   fi
 
   local -a selected_models=()
@@ -967,7 +1009,11 @@ for m in data.get('models', []):
   fi
 
   echo ""
-  ok "${#selected_models[@]} model(s) selected for deployment"
+  if [ ${#selected_models[@]} -eq 1 ]; then
+    ok "1 model selected for deployment"
+  else
+    ok "${#selected_models[@]} models selected for deployment"
+  fi
 
   # Warn if total models (deployed + new) exceeds node count
   local node_count
@@ -1033,7 +1079,51 @@ for m in data.get('models', []):
     local gguf="${all_models[$idx]}"
     local name
     name=$(model_to_k8s_name "$gguf")
+    local ctx_size="32768"
+    if [ -f "$HELM_CHART_DIR/values.yaml" ]; then
+      local from_vals
+      from_vals=$(python3 -c "
+import sys
+try:
+    import yaml
+except ImportError:
+    print(32768)
+    sys.exit(0)
+name = sys.argv[1]
+path = sys.argv[2]
+try:
+    with open(path) as f:
+        v = yaml.safe_load(f) or {}
+except Exception:
+    print(32768)
+    sys.exit(0)
+engine_ctx = (v.get('engine') or {}).get('contextSize', 4096)
+for m in (v.get('models') or []):
+    if m.get('name') == name:
+        print(m.get('contextSize') or engine_ctx)
+        sys.exit(0)
+print(engine_ctx)
+" "$name" "$HELM_CHART_DIR/values.yaml" 2>/dev/null || echo "32768")
+      [ -n "$from_vals" ] && ctx_size="$from_vals"
+    fi
     helm_set_args+=(
+      "--set" "models[$idx].name=$name"
+      "--set" "models[$idx].ggufFile=$gguf"
+      "--set" "models[$idx].contextSize=$ctx_size"
+      "--set" "models[$idx].cpu.request=2"
+      "--set" "models[$idx].cpu.limit=4"
+      "--set" "models[$idx].memory.request=4Gi"
+      "--set" "models[$idx].memory.limit=8Gi"
+    )
+  done
+
+  # Plan-only args: render chart for the one selected model so the preview shows only that model's resources
+  local -a helm_set_args_plan=()
+  for idx in "${!selected_models[@]}"; do
+    local gguf="${selected_models[$idx]}"
+    local name
+    name=$(model_to_k8s_name "$gguf")
+    helm_set_args_plan+=(
       "--set" "models[$idx].name=$name"
       "--set" "models[$idx].ggufFile=$gguf"
       "--set" "models[$idx].cpu.request=2"
@@ -1043,57 +1133,76 @@ for m in data.get('models', []):
     )
   done
 
-  # ── Step 3: Preview (helm template dry-run) ────────────────────────────
+  # ── Step 2: Execution plan (helm-diff + helm_plan.py) ────────────────────────────
 
-  echo -e "\n  ${BOLD}Step 2: Execution plan (helm template)${RESET}\n"
+  echo -e "\n  ${BOLD}Step 2: Execution plan (helm diff) — ${#selected_models[@]} model(s) this run${RESET}\n"
 
-  local rendered
-  rendered=$(helm template neural-gate "$HELM_CHART_DIR" \
-    --namespace inference \
-    "${helm_set_args[@]}" 2>&1)
-
-  # Show each rendered document with kind/name info
-  local doc_count=0
-  local current_doc=""
-  while IFS= read -r line; do
-    if [ "$line" = "---" ]; then
-      if [ -n "$current_doc" ]; then
-        doc_count=$((doc_count + 1))
-        local kind name
-        kind=$(echo "$current_doc" | grep -m1 '^kind:' | awk '{print $2}' || echo "")
-        name=$(echo "$current_doc" | grep -m1 '^  name:' | awk '{print $2}' || echo "")
-        echo -e "  ${GREEN}+${RESET} ${BOLD}${kind}: ${name}${RESET}"
-        echo -e "  ${DIM}  ──────────────────────────────────────────${RESET}"
-        while IFS= read -r docline; do
-          echo -e "  ${CYAN}  $docline${RESET}"
-        done <<< "$current_doc"
-        echo ""
-      fi
-      current_doc=""
-    else
-      if [ -z "$current_doc" ]; then
-        current_doc="$line"
-      else
-        current_doc="$current_doc
-$line"
-      fi
+  if ! helm plugin list 2>/dev/null | grep -q 'diff'; then
+    if [ ! -t 0 ]; then
+      fail "helm-diff plugin is required for the plan view. Install: helm plugin install https://github.com/databus23/helm-diff --verify=false"
+      echo ""
+      return 1
     fi
-  done <<< "$rendered"
-  # Handle last document
-  if [ -n "$current_doc" ]; then
-    doc_count=$((doc_count + 1))
-    local kind name
-    kind=$(echo "$current_doc" | grep -m1 '^kind:' | awk '{print $2}' || echo "")
-    name=$(echo "$current_doc" | grep -m1 '^  name:' | awk '{print $2}' || echo "")
-    echo -e "  ${GREEN}+${RESET} ${BOLD}${kind}: ${name}${RESET}"
-    echo -e "  ${DIM}  ──────────────────────────────────────────${RESET}"
-    while IFS= read -r docline; do
-      echo -e "  ${CYAN}  $docline${RESET}"
-    done <<< "$current_doc"
-    echo ""
+    read -r -p "  Install helm-diff plugin for plan view? (Y/n): " diff_choice
+    diff_choice=$(echo "${diff_choice:-y}" | tr '[:upper:]' '[:lower:]')
+    if [[ ! "$diff_choice" =~ ^(y|yes)?$ ]]; then
+      echo -e "  ${DIM}helm-diff is required. Exiting. Install manually: helm plugin install https://github.com/databus23/helm-diff --verify=false${RESET}\n"
+      return 1
+    fi
+    echo -e "  ${DIM}Installing helm-diff plugin...${RESET}"
+    if ! python3 "$SCRIPT_DIR/scripts/install_tools.py" helm-diff; then
+      fail "Could not install helm-diff. Install manually: helm plugin install https://github.com/databus23/helm-diff --verify=false"
+      echo ""
+      return 1
+    fi
+    ok "helm-diff installed"
   fi
 
-  echo -e "  ${DIM}Plan: $doc_count resource(s) via Helm chart (${#all_models[@]} model(s) total).${RESET}\n"
+  local plan_json
+  plan_json=$(python3 "$SCRIPT_DIR/scripts/helm_plan.py" neural-gate "$HELM_CHART_DIR" inference "${helm_set_args[@]}" 2>/dev/null || echo '{"changes":[],"has_changes":false}')
+  if echo "$plan_json" | grep -q '"error"'; then
+    warn "helm_plan.py failed. ($(echo "$plan_json" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("error","?"))' 2>/dev/null))"
+    plan_json='{"changes":[],"has_changes":true}'
+  fi
+
+  echo -e "  ${DIM}Diff (green + add, red - remove, yellow ~ change):${RESET}\n"
+  helm diff upgrade neural-gate "$HELM_CHART_DIR" --namespace inference "${helm_set_args[@]}" 2>/dev/null || true
+  echo ""
+
+  local change_count
+  change_count=$(echo "$plan_json" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(len(d.get('changes', [])))
+" 2>/dev/null || echo "0")
+
+  echo -e "  ${BOLD}Changes:${RESET}"
+  if echo "$plan_json" | grep -q '"error"'; then
+    echo -e "  ${DIM}(change list unavailable — install PyYAML: pip install pyyaml)${RESET}"
+  elif [ "$change_count" -eq 0 ]; then
+    echo -e "  ${DIM}(no changes — release is up to date)${RESET}"
+  else
+    echo "$plan_json" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for i, c in enumerate(d.get('changes', []), 1):
+    action = c.get('action', '')
+    state = c.get('state', '')
+    print(f\"  {i}. {c.get('kind','')}: {c.get('name','')}, {action}, {state}, {c.get('source_file','')}\")
+" 2>/dev/null
+  fi
+  echo ""
+  local model_summary=""
+  for m in "${all_models[@]}"; do
+    local k8s_name
+    k8s_name=$(model_to_k8s_name "$m")
+    if [[ " ${selected_models[*]} " == *" $m "* ]]; then
+      model_summary="${model_summary:+$model_summary, }$k8s_name [updated]"
+    else
+      model_summary="${model_summary:+$model_summary, }$k8s_name [unchanged]"
+    fi
+  done
+  echo -e "  ${DIM}Plan: ${change_count} resource(s) with changes. On Apply, release will have ${#all_models[@]} model(s) total: ${model_summary}.${RESET}\n"
 
   # ── Step 3: Apply / Reject / Quit ────────────────────────────────────────
 
@@ -1113,6 +1222,11 @@ $line"
           echo -e "  Adopting existing ${CYAN}generic-device-plugin${RESET} DaemonSet for Helm..."
           kubectl label daemonset generic-device-plugin -n kube-system app.kubernetes.io/managed-by=Helm --overwrite 2>/dev/null || true
           kubectl annotate daemonset generic-device-plugin -n kube-system meta.helm.sh/release-name=neural-gate meta.helm.sh/release-namespace=inference --overwrite 2>/dev/null || true
+        fi
+        # Avoid HTTPRoute field-manager conflict (e.g. Envoy Gateway "manager"): delete so Helm can recreate and own them
+        if kubectl get httproute -n inference -l app.kubernetes.io/name=neural-gate --no-headers 2>/dev/null | grep -q .; then
+          echo -e "  Recreating HTTPRoutes so Helm can own them (avoids conflict with Gateway controller)..."
+          kubectl delete httproute -n inference -l app.kubernetes.io/name=neural-gate --ignore-not-found 2>/dev/null || true
         fi
         echo -e "  Running: ${DIM}helm upgrade --install neural-gate ...${RESET}\n"
         helm upgrade --install neural-gate "$HELM_CHART_DIR" \
@@ -1371,7 +1485,7 @@ while true; do
 
   echo -e "What should the setup do next?"
   echo -e "  1)  Configure models directory"
-  echo -e "  2)  Install CLI tools (minikube, kubectl, krunkit, helm, vmnet-helper)"
+  echo -e "  2)  Install CLI tools (minikube, kubectl, krunkit, helm, helm-diff, vmnet-helper)"
   echo -e "  3)  Download models"
   echo -e "  4)  Start minikube cluster"
   echo -e "  5)  Deploy inference stack"

@@ -1,32 +1,42 @@
-# neural-gate Helm values — defaults target local-krunkit (Apple Silicon minikube)
+# neural-gate Helm values — defaults target local-krunkit (Apple Silicon minikube version)
+# cloud values are in values-gke.yaml and values-eks.yaml
 
 namespace: inference
 
 engine:
   image: quay.io/ramalama/ramalama:latest
   command: [llama-server, --host, "0.0.0.0", --port, "8080"]
-  extraArgs: [-ngl, "999", --ctx-size, "4096"]
+  # Context size (max prompt + completion tokens). Increase for longer prompts (e.g. 8192, 16384).
+  contextSize: 4096
+  extraArgs: [-ngl, "999"]
   gpu:
     resource: squat.ai/dri
     count: 1
 
 # Models to deploy — populated by setup.sh option 5 via --set
 # Each entry becomes a KServe InferenceService
-models: []
-# Example:
-# - name: qwen3-8b
-#   ggufFile: qwen3-8b.gguf
-#   cpu:
-#     request: "2"
-#     limit: "4"
-#   memory:
-#     request: 4Gi
-#     limit: 8Gi
+# models: []
+# Example (contextSize is optional; falls back to engine.contextSize):
+models:
+  - name: qwen3-1-7b
+    ggufFile: qwen3-1-7b.gguf
+    # cpu/memory ommitted, use engine defaults
+  - name: qwen3-8b
+    ggufFile: qwen3-8b.gguf
+    contextSize: 16384
+    cpu:
+      request: "2"
+      limit: "4"
+    memory:
+      request: 4Gi
+      limit: 8Gi
 
 gateway:
   enabled: true
   className: envoy
   hostname: inference.local
+  # Set to false if another controller (e.g. Envoy Gateway) manages HTTPRoutes and Helm apply conflicts.
+  createHttpRoutes: true
 
 monitoring:
   enabled: true

@@ -1,4 +1,4 @@
-{{- if and .Values.gateway.enabled .Values.models }}
+{{- if and .Values.gateway.enabled .Values.gateway.createHttpRoutes .Values.models }}
 {{- range .Values.models }}
 {{- $modelName := include "neural-gate.modelName" .name }}
 ---

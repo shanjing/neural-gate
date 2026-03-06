@@ -28,5 +28,5 @@ Kubernetes-native Inference-as-a-Service gateway: one entry point for agentic ap
 ## Documentation
 
 - [Inference design](docs/Inference_design.md) — Engines, GPU passthrough (krunkit), memory budgets, overlays.
-- [Infrastructure design](docs/Infrastructure_design.md) — Kubernetes layout, Helm chart, KServe, Gateway API, deployment workflow.
+- [Infrastructure implementation](docs/Infrastructure_implementation.md) — Kubernetes layout, Helm chart, KServe, Gateway API, deployment workflow.
 - [macOS runbook](docs/mac_runbook.md) — Installation, benchmark, smoke-test steps.
