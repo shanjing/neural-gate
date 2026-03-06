@@ -1,3 +1,10 @@
+{{/*
+  This is the main template that renders Helm charts for InferenceService, a special CRD object
+  for the KServe Controller to generate low-level K8s objects (Deployment, HPA rules, Services, etc.).
+  TODO
+  1. add more detailed documentation
+  2. add production-grade template
+*/}}
 {{- range .Values.models }}
 {{- $modelName := include "neural-gate.modelName" .name }}
 ---
@@ -27,6 +34,8 @@ spec:
       args:
         - --model
         - {{ $.Values.volumes.modelsPath }}/{{ .ggufFile }}
+        - --ctx-size
+        - {{ .contextSize | default $.Values.engine.contextSize | default 4096 | quote }}
         {{- range $.Values.engine.extraArgs }}
         - {{ . | quote }}
         {{- end }}
@@ -36,11 +45,11 @@ spec:
         protocol: TCP
       resources:
         requests:
-          cpu: {{ .cpu.request | default "2" | quote }}
-          memory: {{ .memory.request | default "4Gi" }}
+          cpu: {{ with index . "cpu" }}{{ .request | default "2" | quote }}{{ else }}"2"{{ end }}
+          memory: {{ with index . "memory" }}{{ .request | default "4Gi" }}{{ else }}4Gi{{ end }}
         limits:
-          cpu: {{ .cpu.limit | default "4" | quote }}
-          memory: {{ .memory.limit | default "8Gi" }}
+          cpu: {{ with index . "cpu" }}{{ .limit | default "4" | quote }}{{ else }}"4"{{ end }}
+          memory: {{ with index . "memory" }}{{ .limit | default "8Gi" }}{{ else }}8Gi{{ end }}
           {{ $.Values.engine.gpu.resource }}: {{ $.Values.engine.gpu.count }}
       readinessProbe:
         httpGet:
