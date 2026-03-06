@@ -49,9 +49,6 @@ For inference design and engine selection, see [Inference_design.md](Inference_d
 ```
 The Inference workflow follows a North-South traffic pattern. 
 
-
-
-
 ### Resource Layers
 
 | Layer | Managed by | What it does |
