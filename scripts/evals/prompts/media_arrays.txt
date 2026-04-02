@@ -1,0 +1,28 @@
+You are an expert Python programmer with world-class algorithmic skills.
+
+Problem:
+Given two sorted arrays nums1 and nums2 of size m and n respectively, return the median of the two sorted arrays.
+
+The overall run time complexity should be O(log (m+n)).
+
+Constraints:
+- 0 <= m, n <= 1000
+- -10^6 <= nums1[i], nums2[i] <= 10^6
+
+Write a complete, clean Python solution as a function called `findMedianSortedArrays`.
+
+Requirements:
+1. First, use structured step-by-step reasoning (the distilled model loves <think> tags — feel free to use them).
+2. Then provide the full working code.
+3. Finally, include a test harness that runs these exact cases and prints the results.
+
+Test cases (must all pass):
+1. nums1 = [1,3], nums2 = [2] → expected: 2.0
+2. nums1 = [1,2], nums2 = [3,4] → expected: 2.5
+3. nums1 = [0,0], nums2 = [0,0] → expected: 0.0
+4. nums1 = [], nums2 = [1] → expected: 1.0
+5. nums1 = [2], nums2 = [] → expected: 2.0
+
+Bonus (optional but great for comparison):
+- Add a comment explaining the time and space complexity.
+- Make the code as clean and Pythonic as possible.
